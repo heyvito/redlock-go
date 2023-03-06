@@ -15,7 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func AssertNotLockable(t *testing.T, rl *Redlock, resource string) {
+func AssertNotLockable(t *testing.T, rl Redlock, resource string) {
 	locked, err := rl.IsLocked(resource)
 	require.NoError(t, err)
 	assert.True(t, locked, "Expected '"+resource+"' to be locked")
@@ -33,7 +33,7 @@ func AutoUnlock(t *testing.T, info *LockInfo) {
 	t.Cleanup(info.Unlock)
 }
 
-func MakeClient(t *testing.T) *Redlock {
+func MakeClient(t *testing.T) Redlock {
 	r := redis.NewClient(&redis.Options{
 		Addr: "localhost:6379",
 		DB:   0,
@@ -44,7 +44,7 @@ func MakeClient(t *testing.T) *Redlock {
 
 	t.Cleanup(func() { _ = r.Close() })
 
-	return NewRedlock(r)
+	return New(r)
 }
 
 const ttl = 1000
@@ -199,7 +199,7 @@ func TestWrapperLock(t *testing.T) {
 	cli := MakeClient(t)
 	key := RandomKey(t)
 
-	wrapper := cli.clients[0]
+	wrapper := cli.(*redlock).clients[0]
 	err := wrapper.lock(key, "test", 5000)
 	require.NoError(t, err)
 

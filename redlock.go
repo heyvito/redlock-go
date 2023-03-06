@@ -1,21 +1,33 @@
 package redlock
 
 import (
+	"github.com/redis/go-redis/v9"
 	"math/rand"
 	"sort"
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/redis/go-redis/v9"
 )
 
-func NewRedlock(clients ...*redis.Client) *Redlock {
+type Redlock interface {
+	Lock(resource string, ttl int) (*LockInfo, error)
+	Locking(resource string, ttl int, fn func() error) error
+	Unlock(info *LockInfo)
+	RemainingTTLForLock(info *LockInfo) (int, error)
+	RemainingTTLForResource(resource string) (int, error)
+	IsLocked(resource string) (bool, error)
+	IsLockValid(info *LockInfo) (bool, error)
+	ExtendLock(info *LockInfo, newTTL int) error
+	TryGetRemainingTTL(resource string) (ok bool, value string, ttl int, err error)
+}
+
+func New(clients ...*redis.Client) Redlock {
 	instances := make([]*redisWrapper, len(clients))
 	for i, c := range clients {
 		instances[i] = &redisWrapper{c}
 	}
 
-	return &Redlock{
+	return &redlock{
 		clients:          instances,
 		quorum:           (len(clients) / 2) + 1,
 		RetryCount:       3,
@@ -25,7 +37,7 @@ func NewRedlock(clients ...*redis.Client) *Redlock {
 	}
 }
 
-type Redlock struct {
+type redlock struct {
 	clients          []*redisWrapper
 	RetryCount       int
 	RetryDelay       time.Duration
@@ -35,7 +47,7 @@ type Redlock struct {
 	quorum           int
 }
 
-func (r *Redlock) Lock(resource string, ttl int) (*LockInfo, error) {
+func (r *redlock) Lock(resource string, ttl int) (*LockInfo, error) {
 	value := uuid.NewString()
 	lockInfo := r.tryLockInstances(resource, value, ttl)
 	if lockInfo == nil {
@@ -45,7 +57,7 @@ func (r *Redlock) Lock(resource string, ttl int) (*LockInfo, error) {
 	return lockInfo, nil
 }
 
-func (r *Redlock) Locking(resource string, ttl int, fn func() error) error {
+func (r *redlock) Locking(resource string, ttl int, fn func() error) error {
 	li, err := r.Lock(resource, ttl)
 	if err != nil {
 		return err
@@ -54,17 +66,17 @@ func (r *Redlock) Locking(resource string, ttl int, fn func() error) error {
 	return fn()
 }
 
-func (r *Redlock) Unlock(info *LockInfo) {
+func (r *redlock) Unlock(info *LockInfo) {
 	r.unlock(info.resource, info.value)
 }
 
-func (r *Redlock) unlock(resource, value string) {
+func (r *redlock) unlock(resource, value string) {
 	for _, c := range r.clients {
 		c.unlock(resource, value)
 	}
 }
 
-func (r *Redlock) RemainingTTLForLock(info *LockInfo) (int, error) {
+func (r *redlock) RemainingTTLForLock(info *LockInfo) (int, error) {
 	ok, value, ttl, err := r.TryGetRemainingTTL(info.resource)
 	if err != nil {
 		return 0, err
@@ -75,7 +87,7 @@ func (r *Redlock) RemainingTTLForLock(info *LockInfo) (int, error) {
 	return ttl, nil
 }
 
-func (r *Redlock) RemainingTTLForResource(resource string) (int, error) {
+func (r *redlock) RemainingTTLForResource(resource string) (int, error) {
 	ok, _, ttl, err := r.TryGetRemainingTTL(resource)
 	if err != nil {
 		return 0, err
@@ -86,7 +98,7 @@ func (r *Redlock) RemainingTTLForResource(resource string) (int, error) {
 	return ttl, nil
 }
 
-func (r *Redlock) IsLocked(resource string) (bool, error) {
+func (r *redlock) IsLocked(resource string) (bool, error) {
 	ttl, err := r.RemainingTTLForResource(resource)
 	if err != nil {
 		return false, err
@@ -95,7 +107,7 @@ func (r *Redlock) IsLocked(resource string) (bool, error) {
 	return ttl > 0, nil
 }
 
-func (r *Redlock) IsLockValid(info *LockInfo) (bool, error) {
+func (r *redlock) IsLockValid(info *LockInfo) (bool, error) {
 	ttl, err := r.RemainingTTLForLock(info)
 	if err != nil {
 		return false, err
@@ -103,7 +115,7 @@ func (r *Redlock) IsLockValid(info *LockInfo) (bool, error) {
 	return ttl > 0, nil
 }
 
-func (r *Redlock) ExtendLock(info *LockInfo, newTTL int) error {
+func (r *redlock) ExtendLock(info *LockInfo, newTTL int) error {
 	if info == nil {
 		panic("nil LockInfo provided to ExtendLock")
 	}
@@ -119,7 +131,7 @@ func (r *Redlock) ExtendLock(info *LockInfo, newTTL int) error {
 	return nil
 }
 
-func (r *Redlock) TryGetRemainingTTL(resource string) (ok bool, value string, ttl int, err error) {
+func (r *redlock) TryGetRemainingTTL(resource string) (ok bool, value string, ttl int, err error) {
 	allTTLs := map[string][]int{}
 	thence := time.Now()
 	for _, c := range r.clients {
@@ -158,7 +170,7 @@ func (r *Redlock) TryGetRemainingTTL(resource string) (ok bool, value string, tt
 	return false, "", 0, nil
 }
 
-func (r *Redlock) tryLockInstances(resource string, value string, ttl int) *LockInfo {
+func (r *redlock) tryLockInstances(resource string, value string, ttl int) *LockInfo {
 	for i := 0; i < r.RetryCount; i++ {
 		if i > 0 {
 			time.Sleep(r.attemptRetryDelay(i))
@@ -172,7 +184,7 @@ func (r *Redlock) tryLockInstances(resource string, value string, ttl int) *Lock
 	return nil
 }
 
-func (r *Redlock) attemptRetryDelay(attempt int) time.Duration {
+func (r *redlock) attemptRetryDelay(attempt int) time.Duration {
 	var retryDelay time.Duration
 	if r.RetryDelayFn != nil {
 		retryDelay = r.RetryDelayFn(attempt)
@@ -183,7 +195,7 @@ func (r *Redlock) attemptRetryDelay(attempt int) time.Duration {
 	return time.Millisecond * time.Duration(retryDelay.Milliseconds()+int64(rand.Intn(r.RetryJitter)))
 }
 
-func (r *Redlock) lockInstances(resource string, value string, ttl int) *LockInfo {
+func (r *redlock) lockInstances(resource string, value string, ttl int) *LockInfo {
 	thence := time.Now()
 	locked := 0
 
@@ -213,6 +225,6 @@ func (r *Redlock) lockInstances(resource string, value string, ttl int) *LockInf
 	return nil
 }
 
-func (r *Redlock) drift(ttl int) int {
+func (r *redlock) drift(ttl int) int {
 	return int(float64(ttl)*r.ClockDriftFactor) + 2
 }

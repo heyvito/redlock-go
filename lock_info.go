@@ -3,7 +3,7 @@ package redlock
 import "time"
 
 type LockInfo struct {
-	parent    *Redlock
+	parent    *redlock
 	Validity  int
 	ExpiresAt time.Time
 	resource  string
